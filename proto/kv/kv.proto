@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package kv;
+
+import "eraftpb.proto";
+import "google/protobuf/empty.proto";
+
+service Kv {
+    // Required to get connection going.
+    rpc Handshake(google.protobuf.Empty) returns (google.protobuf.Empty);
+
+    rpc Join(JoinRequest) returns (JoinResponse);
+
+    rpc Raft(stream kv.Message) returns (google.protobuf.Empty);
+}
+
+message JoinRequest {
+    uint64 id = 1;
+}
+
+message JoinResponse {
+    bool joined = 1;
+}
