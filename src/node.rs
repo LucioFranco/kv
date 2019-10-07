@@ -1,17 +1,17 @@
 use crate::{network, pb};
+use prost::Message;
 use raft::{
-    eraftpb::{ConfChange, ConfChangeType, Snapshot, EntryType},
+    eraftpb::{ConfChange, ConfChangeType, EntryType, Snapshot},
     storage::MemStorage,
     RawNode,
 };
+use slog::{Drain, OwnedKVList, Record};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use prost::Message;
 use tokio::{future::FutureExt, sync::oneshot, timer};
-use tracing::{info, warn, trace, error};
-use slog::{Drain, OwnedKVList, Record};
+use tracing::{error, info, trace, warn};
 
 #[derive(Debug)]
 pub enum Control {
@@ -22,6 +22,7 @@ pub enum Control {
 #[derive(Debug)]
 pub enum Proposal {
     AddNode { id: u64 },
+    Put { key: Vec<u8>, value: Vec<u8> }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -86,7 +87,7 @@ impl Node {
                 let msg_type = pb::MessageType::from_i32(msg_type);
 
                 if Some(MsgRequestVote) == msg_type
-                    || Some(MsgRequestPreVote)  == msg_type
+                    || Some(MsgRequestPreVote) == msg_type
                     || Some(MsgHeartbeat) == msg_type && commit == 0
                 {
                     info!(message = "Recieved inbound raft message.", %commit);
@@ -124,13 +125,16 @@ impl Node {
             raft_inbound_events,
             router,
             next_request_id: RequestId(0),
-            in_flight_proposals: HashMap::new()
+            in_flight_proposals: HashMap::new(),
         })
     }
 
     pub async fn run(&mut self) -> Result<(), crate::Error> {
         let timeout = Duration::from_millis(100);
         let mut remaining_timeout = timeout;
+
+        let debug_timeout = Duration::from_secs(5);
+        let mut debug_remaining_timeout = timeout;
 
         loop {
             let now = Instant::now();
@@ -153,7 +157,33 @@ impl Node {
                 }
             }
 
+
             let elapsed = now.elapsed();
+            if elapsed >= debug_remaining_timeout {
+                debug_remaining_timeout = debug_timeout;
+
+                let raft::Raft { id, term, state, leader_id, raft_log, .. } = &self.raft.raft;
+                let raft::RaftLog { committed, applied, .. } = raft_log;
+
+                let config = self.raft.raft.prs().configuration();
+
+                let voters = config.voters().len();
+                let learners = config.learners().len();
+
+                info!(
+                    %id,
+                    %term,
+                    ?state,
+                    %voters,
+                    %learners,
+                    %leader_id,
+                    %committed,
+                    %applied,
+                );
+            } else {
+                debug_remaining_timeout -= elapsed;
+            }
+
             if elapsed >= remaining_timeout {
                 remaining_timeout = timeout;
 
@@ -171,7 +201,11 @@ impl Node {
         }
     }
 
-    fn handle_proposal(&mut self, proposal: Proposal, tx: oneshot::Sender<()>) -> Result<(), crate::Error> {
+    fn handle_proposal(
+        &mut self,
+        proposal: Proposal,
+        tx: oneshot::Sender<()>,
+    ) -> Result<(), crate::Error> {
         let req_id = self.next_request_id.0.wrapping_add(1);
         self.in_flight_proposals.insert(RequestId(req_id), tx);
         let req_id_bytes = vec![req_id];
@@ -183,6 +217,9 @@ impl Node {
                 conf_change.set_change_type(ConfChangeType::AddNode);
 
                 self.raft.propose_conf_change(req_id_bytes, conf_change)?;
+            },
+            Proposal::Put { key, value } => {
+                
             }
         }
 
@@ -240,8 +277,6 @@ impl Node {
         Ok(())
     }
 }
-
-
 
 #[derive(Debug, Default)]
 pub(crate) struct SlogTracer;

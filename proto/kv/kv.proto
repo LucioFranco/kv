@@ -11,8 +11,17 @@ service Kv {
 
     rpc Join(JoinRequest) returns (JoinResponse);
 
-    rpc Raft(stream kv.Message) returns (google.protobuf.Empty);
+    rpc Put(PutRequest) returns (PutResponse);
+
+    rpc Raft(stream Message) returns (google.protobuf.Empty);
 }
+
+message PutRequest {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message PutResponse {}
 
 message JoinRequest {
     uint64 id = 1;

@@ -1,23 +1,15 @@
-mod network;
-mod node;
-mod pb;
-
 use futures_util::StreamExt;
-use std::{future::Future, net::SocketAddr, path::Path};
 use structopt::StructOpt;
 use tokio::net::signal;
-use tracing::{debug, error, info, info_span};
+use tracing::{error, info, info_span};
 use tracing_futures::Instrument;
 
-use network::{Peers, Server};
-use node::Node;
-
-pub(crate) type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+use kv::{Error, Node, Server};
 
 #[derive(Clone, Debug, StructOpt)]
-#[structopt(name = "kv", about = "A consitient kv store.")]
+#[structopt(name = "kv server", about = "A consitient kv store.")]
 #[allow(non_camel_case_types)]
-pub enum Opts {
+enum Opts {
     bootstrap { id: u64 },
     join { id: u64, target: u64 },
 }
@@ -26,18 +18,7 @@ pub enum Opts {
 async fn main() -> Result<(), Error> {
     let opts = Opts::from_args();
 
-    let filter = if let Ok(_) = std::env::var("RUST_LOG") {
-         tracing_subscriber::filter::EnvFilter::from_default_env()
-    } else {
-        tracing_subscriber::filter::EnvFilter::from_default_env().add_directive("kv=info".parse()?)
-    };
-
-    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
-        .with_env_filter(filter)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)?;
-    tracing_log::LogTracer::init()?;
+    kv::init_tracing("kv_server")?;
 
     info!("Starting the KV Store.");
 
@@ -45,7 +26,7 @@ async fn main() -> Result<(), Error> {
 
     info!(message = "Loading peers from.", file = %peer_file);
 
-    let peers = load_peers(peer_file).await?;
+    let peers = kv::load_peers(peer_file).await?;
 
     let id = match opts {
         Opts::bootstrap { id, .. } => id,
@@ -70,7 +51,7 @@ async fn main() -> Result<(), Error> {
         }
     };
 
-    crate::spawn(
+    kv::spawn(
         async move {
             info!("Starting raft module.");
             if let Err(error) = node.run().await {
@@ -85,25 +66,4 @@ async fn main() -> Result<(), Error> {
     signal::ctrl_c()?.next().await;
 
     Ok(())
-}
-
-async fn load_peers(file: impl AsRef<Path>) -> Result<Peers, crate::Error> {
-    let bytes = tokio::fs::read(file).await?;
-
-    let s = String::from_utf8(bytes)?;
-
-    let mut peers = std::collections::HashMap::new();
-
-    for (id, line) in s.lines().enumerate() {
-        let addr = line.parse::<SocketAddr>()?;
-        peers.insert(id as u64 + 1, addr);
-    }
-
-    debug!(message = "Loaded peers.", ?peers);
-
-    Ok(std::sync::Arc::new(peers))
-}
-
-fn spawn(f: impl Future<Output = ()> + Send + 'static, span: tracing::Span) {
-    tokio::spawn(f.instrument(span));
 }

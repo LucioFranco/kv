@@ -189,6 +189,10 @@ impl pb::server::Kv for KvServer {
         }
     }
 
+    async fn put(&self, _req: Request<pb::PutRequest>) -> Result<Response<pb::PutResponse>, Status> {
+        Ok(Response::new(pb::PutResponse {}))
+    }
+
     async fn raft(&self, mut req: Request<Streaming<pb::Message>>) -> Result<Response<()>, Status> {
         while let Some(msg) = req.get_mut().message().await? {
             let msg = node::Control::Raft(msg.into());
