@@ -1,10 +1,10 @@
-use structopt::StructOpt;
-use kv::{Error, pb};
-use std::net::SocketAddr;
-use tracing::{info, error};
-use tonic::Request;
-use tokio::net::signal;
 use futures_util::StreamExt;
+use kv::{pb, Error};
+use std::net::SocketAddr;
+use structopt::StructOpt;
+use tokio::net::signal;
+use tonic::Request;
+use tracing::{error, info};
 
 #[derive(Clone, Debug, StructOpt)]
 #[structopt(name = "kv client", about = "A consitient kv store client")]
@@ -25,7 +25,7 @@ struct Opts {
 #[derive(Debug, Clone, StructOpt)]
 #[allow(non_camel_case_types)]
 enum Command {
-    put { key: String, value: String }
+    put { key: String, value: String },
 }
 
 #[tokio::main]
@@ -42,7 +42,10 @@ async fn main() -> Result<(), Error> {
     let dst = if let Some(endpoint) = &opts.endpoint {
         endpoint.to_string()
     } else {
-        let peer_file = opts.peer_config.clone().unwrap_or_else(|| "peers.txt".to_string());
+        let peer_file = opts
+            .peer_config
+            .clone()
+            .unwrap_or_else(|| "peers.txt".to_string());
 
         info!(message = "Loading peers from.", file = %peer_file);
 
@@ -68,7 +71,7 @@ async fn main() -> Result<(), Error> {
                 Ok(response) => info!(message = "Put rpc completed.", ?response),
                 Err(error) => error!(message = "Put rpc failed.", %error),
             }
-        },
+        }
     }
 
     Ok(())

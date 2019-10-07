@@ -3,8 +3,8 @@ use structopt::StructOpt;
 use tokio::net::signal;
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument;
-
-use kv::{Error, Node, Server};
+use kv::{Error, Node, Server, SledStorage, MemStorage};
+use raft::eraftpb::ConfState;
 
 #[derive(Clone, Debug, StructOpt)]
 #[structopt(name = "kv server", about = "A consitient kv store.")]
@@ -43,9 +43,13 @@ async fn main() -> Result<(), Error> {
     let enter = node_span.enter();
 
     let mut node = match opts {
-        Opts::bootstrap { .. } => Node::bootstrap(id, peers, raft_inbound_events)?,
+        Opts::bootstrap { .. } => {
+            let storage = MemStorage::new_with_conf_state(ConfState::from((vec![id], vec![])));
+            Node::bootstrap(id, peers, raft_inbound_events, storage)?
+        },
         Opts::join { target, .. } => {
-            Node::join(id, target, peers, raft_inbound_events)
+            let storage = MemStorage::default();
+            Node::join(id, target, peers, raft_inbound_events, storage)
                 .instrument(node_span.clone())
                 .await?
         }

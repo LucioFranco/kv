@@ -189,7 +189,10 @@ impl pb::server::Kv for KvServer {
         }
     }
 
-    async fn put(&self, _req: Request<pb::PutRequest>) -> Result<Response<pb::PutResponse>, Status> {
+    async fn put(
+        &self,
+        _req: Request<pb::PutRequest>,
+    ) -> Result<Response<pb::PutResponse>, Status> {
         Ok(Response::new(pb::PutResponse {}))
     }
 

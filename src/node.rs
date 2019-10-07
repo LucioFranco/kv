@@ -1,8 +1,7 @@
-use crate::{network, pb};
+use crate::{network, pb, storage::Storage};
 use prost::Message;
 use raft::{
     eraftpb::{ConfChange, ConfChangeType, EntryType, Snapshot},
-    storage::MemStorage,
     RawNode,
 };
 use slog::{Drain, OwnedKVList, Record};
@@ -22,31 +21,32 @@ pub enum Control {
 #[derive(Debug)]
 pub enum Proposal {
     AddNode { id: u64 },
-    Put { key: Vec<u8>, value: Vec<u8> }
+    Put { key: Vec<u8>, value: Vec<u8> },
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct RequestId(u8);
 
 /// The kv node that contains all the state.
-pub struct Node {
+pub struct Node<S: Storage> {
     #[allow(unused)]
     id: u64,
-    raft: RawNode<MemStorage>,
+    raft: RawNode<S>,
     raft_inbound_events: network::RaftInboundEvents,
     router: network::RaftPeerRouter,
     next_request_id: RequestId,
     in_flight_proposals: HashMap<RequestId, oneshot::Sender<()>>,
 }
 
-impl Node {
+impl<S: Storage> Node<S> {
     pub fn bootstrap(
         id: u64,
         peers: network::Peers,
         raft_inbound_events: network::RaftInboundEvents,
+        storage: S,
     ) -> Result<Self, crate::Error> {
         info!("Bootstraping raft.");
-        Self::new(id, peers, raft_inbound_events)
+        Self::new(id, peers, raft_inbound_events, storage)
     }
 
     pub async fn join(
@@ -54,6 +54,7 @@ impl Node {
         target: u64,
         peers: network::Peers,
         mut raft_inbound_events: network::RaftInboundEvents,
+        storage: S,
     ) -> Result<Self, crate::Error> {
         let target = peers.get(&target).expect("Target id not in peer list!");
 
@@ -78,20 +79,20 @@ impl Node {
 
         info!("Waiting for next inbound raft message");
         while let Some(msg) = raft_inbound_events.recv().await {
-            if let Control::Raft(pb::Message {
-                msg_type, commit, ..
-            }) = msg
+            if let Control::Raft(msg) = msg
             {
                 use pb::MessageType::*;
 
-                let msg_type = pb::MessageType::from_i32(msg_type);
+                let msg_type = pb::MessageType::from_i32(msg.msg_type);
 
                 if Some(MsgRequestVote) == msg_type
                     || Some(MsgRequestPreVote) == msg_type
-                    || Some(MsgHeartbeat) == msg_type && commit == 0
+                    || Some(MsgHeartbeat) == msg_type && msg.commit == 0
                 {
-                    info!(message = "Recieved inbound raft message.", %commit);
-                    return Self::new(id, peers, raft_inbound_events);
+                    info!(message = "Recieved inbound raft message.", incoming_id = %msg.to, commit = %msg.commit);
+                    let mut me = Self::new(id, peers, raft_inbound_events, storage)?;
+                    me.raft.step(msg.into())?;
+                    return Ok(me);
                 }
             }
         }
@@ -103,6 +104,7 @@ impl Node {
         id: u64,
         peers: network::Peers,
         raft_inbound_events: network::RaftInboundEvents,
+        storage: S,
     ) -> Result<Self, crate::Error> {
         let config = raft::Config {
             id,
@@ -112,7 +114,9 @@ impl Node {
         };
         config.validate()?;
 
-        let storage = MemStorage::new_with_conf_state((vec![1], vec![]));
+        // let storage = MemStorage::new_with_conf_state((vec![1], vec![]));
+        // let temp_dir = std::env::temp_dir();
+        // let storage = Storage::new(format!("{:?}/{}.log", temp_dir, id))?;
         let logger = slog::Logger::root(slog::Fuse(SlogTracer::default()), slog::o!());
 
         let raft = RawNode::new(&config, storage, &logger)?;
@@ -133,7 +137,7 @@ impl Node {
         let timeout = Duration::from_millis(100);
         let mut remaining_timeout = timeout;
 
-        let debug_timeout = Duration::from_secs(5);
+        let debug_timeout = Duration::from_secs(15);
         let mut debug_remaining_timeout = timeout;
 
         loop {
@@ -157,13 +161,21 @@ impl Node {
                 }
             }
 
-
             let elapsed = now.elapsed();
             if elapsed >= debug_remaining_timeout {
                 debug_remaining_timeout = debug_timeout;
 
-                let raft::Raft { id, term, state, leader_id, raft_log, .. } = &self.raft.raft;
-                let raft::RaftLog { committed, applied, .. } = raft_log;
+                let raft::Raft {
+                    id,
+                    term,
+                    state,
+                    leader_id,
+                    raft_log,
+                    ..
+                } = &self.raft.raft;
+                let raft::RaftLog {
+                    committed, applied, ..
+                } = raft_log;
 
                 let config = self.raft.raft.prs().configuration();
 
@@ -217,10 +229,8 @@ impl Node {
                 conf_change.set_change_type(ConfChangeType::AddNode);
 
                 self.raft.propose_conf_change(req_id_bytes, conf_change)?;
-            },
-            Proposal::Put { key, value } => {
-                
             }
+            Proposal::Put { key, value } => {}
         }
 
         Ok(())
@@ -236,13 +246,13 @@ impl Node {
         let mut ready = self.raft.ready();
         let store = self.raft.mut_store();
 
-        if let Err(error) = store.wl().append(ready.entries()) {
+        if let Err(error) = store.append(ready.entries()) {
             error!(message = "Append entries failed.", %error);
             return Ok(());
         }
 
         if *ready.snapshot() != Snapshot::default() {
-            if let Err(error) = store.wl().append(ready.entries()) {
+            if let Err(error) = store.append(ready.entries()) {
                 error!(message = "Apply snapshot failed.", %error);
                 return Ok(());
             }
@@ -266,7 +276,7 @@ impl Node {
                     cc.merge(&entry.data).unwrap();
 
                     let cs = self.raft.apply_conf_change(&cc)?.clone();
-                    self.raft.mut_store().wl().set_conf_state(cs, None);
+                    self.raft.mut_store().set_conf_state(cs)?;
                     self.notify_proposal(entry.context);
                 }
             }
