@@ -5,8 +5,8 @@ mod storage;
 pub mod pb;
 
 pub use network::{Peers, Server};
-pub use storage::{MemStorage, SledStorage};
 pub use node::Node;
+pub use storage::{MemStorage, SledStorage};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use structopt::StructOpt;
 use tokio::net::signal;
 use tonic::Request;
-use tracing::{error, info};
+use tracing::{error, debug};
 
 #[derive(Clone, Debug, StructOpt)]
 #[structopt(name = "kv client", about = "A consitient kv store client")]
@@ -26,6 +26,7 @@ struct Opts {
 #[allow(non_camel_case_types)]
 enum Command {
     put { key: String, value: String },
+    get { key: String },
 }
 
 #[tokio::main]
@@ -47,7 +48,7 @@ async fn main() -> Result<(), Error> {
             .clone()
             .unwrap_or_else(|| "peers.txt".to_string());
 
-        info!(message = "Loading peers from.", file = %peer_file);
+        debug!(message = "Loading peers from.", file = %peer_file);
 
         let peers = kv::load_peers(peer_file).await?;
 
@@ -67,9 +68,33 @@ async fn main() -> Result<(), Error> {
                 value: value.into_bytes(),
             };
 
+            debug!(message = "Sending put request.");
             match client.put(Request::new(put)).await {
-                Ok(response) => info!(message = "Put rpc completed.", ?response),
+                Ok(response) => {
+                    debug!(message = "Put rpc completed.", ?response);
+                    println!("Ok");
+                },
                 Err(error) => error!(message = "Put rpc failed.", %error),
+            }
+        }
+
+        Command::get { key } => {
+            let get = pb::RangeRequest {
+                key: key.into_bytes(),
+                range_end: Vec::new(),
+            };
+
+            debug!(message = "Sending get request.");
+            match client.range(Request::new(get)).await {
+                Ok(response) => {
+                    for kv in &response.get_ref().kvs {
+                        let s = String::from_utf8_lossy(&kv.value[..]);
+                        println!("{}", s);
+                    }
+
+                    debug!(message = "Get rpc completed.", ?response);
+                },
+                Err(error) => error!(message = "Get rpc failed.", %error),
             }
         }
     }

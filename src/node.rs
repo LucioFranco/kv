@@ -1,16 +1,18 @@
 use crate::{network, pb, storage::Storage};
+use bytes::BytesMut;
 use prost::Message;
 use raft::{
     eraftpb::{ConfChange, ConfChangeType, EntryType, Snapshot},
     RawNode,
 };
+use sled::Db;
 use slog::{Drain, OwnedKVList, Record};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
 use tokio::{future::FutureExt, sync::oneshot, timer};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[derive(Debug)]
 pub enum Control {
@@ -21,7 +23,7 @@ pub enum Control {
 #[derive(Debug)]
 pub enum Proposal {
     AddNode { id: u64 },
-    Put { key: Vec<u8>, value: Vec<u8> },
+    InternalMessage(pb::InternalRaftMessage),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -29,13 +31,13 @@ struct RequestId(u8);
 
 /// The kv node that contains all the state.
 pub struct Node<S: Storage> {
-    #[allow(unused)]
     id: u64,
     raft: RawNode<S>,
     raft_inbound_events: network::RaftInboundEvents,
     router: network::RaftPeerRouter,
     next_request_id: RequestId,
     in_flight_proposals: HashMap<RequestId, oneshot::Sender<()>>,
+    db: Db,
 }
 
 impl<S: Storage> Node<S> {
@@ -44,9 +46,14 @@ impl<S: Storage> Node<S> {
         peers: network::Peers,
         raft_inbound_events: network::RaftInboundEvents,
         storage: S,
+        db: Db,
     ) -> Result<Self, crate::Error> {
         info!("Bootstraping raft.");
-        Self::new(id, peers, raft_inbound_events, storage)
+        let mut me = Self::new(id, peers, raft_inbound_events, storage, db)?;
+        for _ in 0..10 {
+            me.raft.tick();
+        }
+        Ok(me)
     }
 
     pub async fn join(
@@ -55,6 +62,7 @@ impl<S: Storage> Node<S> {
         peers: network::Peers,
         mut raft_inbound_events: network::RaftInboundEvents,
         storage: S,
+        db: Db,
     ) -> Result<Self, crate::Error> {
         let target = peers.get(&target).expect("Target id not in peer list!");
 
@@ -79,8 +87,7 @@ impl<S: Storage> Node<S> {
 
         info!("Waiting for next inbound raft message");
         while let Some(msg) = raft_inbound_events.recv().await {
-            if let Control::Raft(msg) = msg
-            {
+            if let Control::Raft(msg) = msg {
                 use pb::MessageType::*;
 
                 let msg_type = pb::MessageType::from_i32(msg.msg_type);
@@ -90,7 +97,7 @@ impl<S: Storage> Node<S> {
                     || Some(MsgHeartbeat) == msg_type && msg.commit == 0
                 {
                     info!(message = "Recieved inbound raft message.", incoming_id = %msg.to, commit = %msg.commit);
-                    let mut me = Self::new(id, peers, raft_inbound_events, storage)?;
+                    let mut me = Self::new(id, peers, raft_inbound_events, storage, db)?;
                     me.raft.step(msg.into())?;
                     return Ok(me);
                 }
@@ -105,6 +112,7 @@ impl<S: Storage> Node<S> {
         peers: network::Peers,
         raft_inbound_events: network::RaftInboundEvents,
         storage: S,
+        db: Db,
     ) -> Result<Self, crate::Error> {
         let config = raft::Config {
             id,
@@ -130,6 +138,7 @@ impl<S: Storage> Node<S> {
             router,
             next_request_id: RequestId(0),
             in_flight_proposals: HashMap::new(),
+            db,
         })
     }
 
@@ -156,8 +165,14 @@ impl<S: Storage> Node<S> {
 
             if let Some(msg) = msg {
                 match msg {
-                    Control::Propose(proposal, tx) => self.handle_proposal(proposal, tx)?,
-                    Control::Raft(m) => self.raft.step(m.into())?,
+                    Control::Propose(proposal, tx) => {
+                        debug!(message = "Inbound proposal.", ?proposal);
+                        self.handle_proposal(proposal, tx)?;
+                    }
+                    Control::Raft(m) => {
+                        trace!(message = "Inbound raft message.", message = ?m);
+                        self.raft.step(m.into())?;
+                    }
                 }
             }
 
@@ -227,10 +242,17 @@ impl<S: Storage> Node<S> {
                 let mut conf_change = ConfChange::default();
                 conf_change.node_id = id;
                 conf_change.set_change_type(ConfChangeType::AddNode);
-
                 self.raft.propose_conf_change(req_id_bytes, conf_change)?;
             }
-            Proposal::Put { key, value } => {}
+            Proposal::InternalMessage(request) => {
+                let mut buf = BytesMut::with_capacity(request.encoded_len());
+                if let Err(error) = request.encode(&mut buf) {
+                    error!(message = "Unable to propose request.", %error);
+                    return Ok(());
+                }
+
+                self.raft.propose(req_id_bytes, buf.into_iter().collect())?;
+            }
         }
 
         Ok(())
@@ -252,37 +274,65 @@ impl<S: Storage> Node<S> {
         }
 
         if *ready.snapshot() != Snapshot::default() {
-            if let Err(error) = store.append(ready.entries()) {
+            if let Err(error) = store.apply_snapshot(ready.snapshot().clone()) {
                 error!(message = "Apply snapshot failed.", %error);
                 return Ok(());
             }
         }
 
         for msg in ready.messages.drain(..) {
-            if msg.to != self.id {
-                self.router.send(msg.to, msg.into()).await?;
-            }
+            //if msg.to != self.id {
+            self.router.send(msg.to, msg.into()).await?;
+            //}
         }
 
         if let Some(committed_entries) = ready.committed_entries.take() {
-            for entry in committed_entries {
+            for entry in &committed_entries {
                 if entry.data.is_empty() {
                     // From new elected leaders.
                     continue;
                 }
 
-                if let Some(EntryType::EntryConfChange) = EntryType::from_i32(entry.entry_type) {
+                let entry_type = EntryType::from_i32(entry.entry_type);
+
+                if let Some(EntryType::EntryConfChange) = entry_type {
                     let mut cc = ConfChange::default();
                     cc.merge(&entry.data).unwrap();
 
-                    let cs = self.raft.apply_conf_change(&cc)?.clone();
+                    let cs = self.raft.apply_conf_change(&cc)?;
                     self.raft.mut_store().set_conf_state(cs)?;
-                    self.notify_proposal(entry.context);
+                    self.notify_proposal(entry.context.clone());
                 }
+
+                if let Some(EntryType::EntryNormal) = entry_type {
+                    let mut internal_raft_message = pb::InternalRaftMessage::default();
+                    internal_raft_message.merge(&entry.data).unwrap();
+
+                    if let Err(error) = self.apply(internal_raft_message) {
+                        error!(message = "Unable to apply entry.", %error);
+                        // TODO: return an error to the user
+                    }
+
+                    self.notify_proposal(entry.context.clone());
+                }
+            }
+
+            if let Some(entry) = committed_entries.last() {
+                self.raft
+                    .mut_store()
+                    .set_hard_state(entry.index, entry.term)?;
             }
         }
 
         self.raft.advance(ready);
+
+        Ok(())
+    }
+
+    fn apply(&mut self, req: pb::InternalRaftMessage) -> Result<(), crate::Error> {
+        if let Some(put) = req.put {
+            self.db.insert(put.key, put.value)?;
+        }
 
         Ok(())
     }

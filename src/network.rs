@@ -2,6 +2,7 @@ use crate::{
     node,
     pb::{self, client, server},
 };
+use sled::Db;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{transport, Code, Request, Response, Status, Streaming};
@@ -16,12 +17,13 @@ pub type KvClient = client::KvClient<transport::Channel>;
 pub struct Server {
     bind: SocketAddr,
     peers: Peers,
+    db: Db,
     // TODO: add shutdown handle here.
 }
 
 impl Server {
-    pub fn new(bind: SocketAddr, peers: Peers) -> Self {
-        Self { bind, peers }
+    pub fn new(bind: SocketAddr, peers: Peers, db: Db) -> Self {
+        Self { bind, peers, db }
     }
 
     pub fn start(&mut self) -> Result<RaftInboundEvents, crate::Error> {
@@ -35,6 +37,7 @@ impl Server {
         let server = KvServer {
             inbound_tx: raft_inbound_tx,
             peers: self.peers.clone(),
+            db: self.db.clone(),
         };
 
         let bind = self.bind;
@@ -157,6 +160,7 @@ async fn connect_to_peer(
 struct KvServer {
     inbound_tx: RaftInboundSender,
     peers: Peers,
+    db: Db,
 }
 
 #[tonic::async_trait]
@@ -189,11 +193,40 @@ impl pb::server::Kv for KvServer {
         }
     }
 
-    async fn put(
-        &self,
-        _req: Request<pb::PutRequest>,
-    ) -> Result<Response<pb::PutResponse>, Status> {
+    async fn put(&self, req: Request<pb::PutRequest>) -> Result<Response<pb::PutResponse>, Status> {
+        let put = req.into_inner();
+
+        let req = pb::InternalRaftMessage {
+            put: Some(put),
+            ..Default::default()
+        };
+
+        self.propose(req).await?;
+
         Ok(Response::new(pb::PutResponse {}))
+    }
+
+    async fn range(
+        &self,
+        req: Request<pb::RangeRequest>,
+    ) -> Result<Response<pb::RangeResponse>, Status> {
+        let range = req.into_inner();
+
+        let kvs = if range.range_end.is_empty() {
+            self.db
+                .get(&range.key[..])
+                .map_err(|_| Status::new(Code::Internal, "db error"))?
+                .into_iter()
+                .map(|value| pb::KeyValue {
+                    key: range.key.clone(),
+                    value: Vec::from(&value[..]),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            unimplemented!()
+        };
+
+        Ok(Response::new(pb::RangeResponse { kvs }))
     }
 
     async fn raft(&self, mut req: Request<Streaming<pb::Message>>) -> Result<Response<()>, Status> {
@@ -212,5 +245,26 @@ impl pb::server::Kv for KvServer {
 
     async fn handshake(&self, _: Request<()>) -> Result<Response<()>, Status> {
         Ok(Response::new(()))
+    }
+}
+
+impl KvServer {
+    async fn propose(&self, req: pb::InternalRaftMessage) -> Result<(), Status> {
+        let (tx, rx) = oneshot::channel();
+
+        let proposal = node::Control::Propose(node::Proposal::InternalMessage(req), tx);
+
+        debug!(message = "Submitting proposal for internal message.");
+
+        self.inbound_tx
+            .clone()
+            .send(proposal)
+            .await
+            .map_err(|_| Status::new(Code::Internal, "Inbound sender channel dropped."))?;
+
+        rx.await
+            .map_err(|_| Status::new(Code::Internal, "Proposal sender dropped."))?;
+
+        Ok(())
     }
 }

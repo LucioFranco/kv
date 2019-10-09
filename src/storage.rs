@@ -15,7 +15,9 @@ const LOW_INDEX: [u8; 10] = [255, 255, 255, 255, 255, 255, 255, 255, 255, 0];
 
 pub trait Storage: raft::storage::Storage {
     fn append(&self, entries: &[Entry]) -> Result<(), crate::Error>;
+    fn apply_snapshot(&self, snapshot: Snapshot) -> Result<(), crate::Error>;
     fn set_conf_state(&self, cs: ConfState) -> Result<(), crate::Error>;
+    fn set_hard_state(&self, commit: u64, term: u64) -> Result<(), crate::Error>;
 }
 
 impl Storage for MemStorage {
@@ -24,8 +26,20 @@ impl Storage for MemStorage {
         Ok(())
     }
 
+    fn apply_snapshot(&self, snapshot: Snapshot) -> Result<(), crate::Error> {
+        self.wl().apply_snapshot(snapshot)?;
+        Ok(())
+    }
+
     fn set_conf_state(&self, cs: ConfState) -> Result<(), crate::Error> {
         self.wl().set_conf_state(cs, None);
+        Ok(())
+    }
+
+    fn set_hard_state(&self, commit: u64, term: u64) -> Result<(), crate::Error> {
+        let mut me = self.wl();
+        me.mut_hard_state().commit = commit;
+        me.mut_hard_state().term = term;
         Ok(())
     }
 }
@@ -130,15 +144,15 @@ impl raft::storage::Storage for SledStorage {
         }
     }
 
-    fn snapshot(&self, request_index: u64) -> raft::Result<Snapshot> {
+    fn snapshot(&self, _request_index: u64) -> raft::Result<Snapshot> {
         unimplemented!()
     }
 }
 
-fn make_log_key(idx: u64) -> [u8;9] {
-    use std::io::Cursor;
+fn make_log_key(idx: u64) -> [u8; 9] {
     use bytes::BufMut;
-    let mut key = [0;9];
+    use std::io::Cursor;
+    let mut key = [0; 9];
 
     {
         let mut key = Cursor::new(&mut key[..]);

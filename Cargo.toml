@@ -29,6 +29,7 @@ tracing-futures = { version = "0.0.1-alpha.1", default-features = false, feature
 structopt = "0.2"
 async-stream = "0.1"
 sled = "0.28"
+uuid = { version = "0.7", features = ["v4"] }
 
 [build-dependencies]
 tonic-build = { git = "https://github.com/hyperium/tonic" }

@@ -1,10 +1,10 @@
 use futures_util::StreamExt;
+use kv::{Error, MemStorage, Node, Server};
+use raft::eraftpb::ConfState;
 use structopt::StructOpt;
 use tokio::net::signal;
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument;
-use kv::{Error, Node, Server, SledStorage, MemStorage};
-use raft::eraftpb::ConfState;
 
 #[derive(Clone, Debug, StructOpt)]
 #[structopt(name = "kv server", about = "A consitient kv store.")]
@@ -35,7 +35,13 @@ async fn main() -> Result<(), Error> {
 
     let bind = peers.get(&id).expect("Provided id not in peers list.");
 
-    let mut server = Server::new(*bind, peers.clone());
+    let db_file = uuid::Uuid::new_v4();
+    let mut db_path = std::env::temp_dir().join(db_file.to_string());
+    db_path.set_extension("sled");
+
+    let db = sled::Db::open(db_path)?;
+
+    let mut server = Server::new(*bind, peers.clone(), db.clone());
 
     let raft_inbound_events = server.start()?;
 
@@ -45,11 +51,13 @@ async fn main() -> Result<(), Error> {
     let mut node = match opts {
         Opts::bootstrap { .. } => {
             let storage = MemStorage::new_with_conf_state(ConfState::from((vec![id], vec![])));
-            Node::bootstrap(id, peers, raft_inbound_events, storage)?
-        },
+            Node::bootstrap(id, peers, raft_inbound_events, storage, db)?
+        }
         Opts::join { target, .. } => {
-            let storage = MemStorage::default();
-            Node::join(id, target, peers, raft_inbound_events, storage)
+            // TODO: find better method to let bootstrapper win its campagin
+            tokio::timer::delay_for(std::time::Duration::from_secs(3)).await;
+            let storage = MemStorage::new();
+            Node::join(id, target, peers, raft_inbound_events, storage, db)
                 .instrument(node_span.clone())
                 .await?
         }
