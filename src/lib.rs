@@ -3,6 +3,7 @@ mod node;
 mod storage;
 
 pub mod pb;
+pub mod wal;
 
 pub use network::{Peers, Server};
 pub use node::Node;

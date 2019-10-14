@@ -31,6 +31,7 @@ struct RequestId(u8);
 
 /// The kv node that contains all the state.
 pub struct Node<S: Storage> {
+    #[allow(dead_code)]
     id: u64,
     raft: RawNode<S>,
     raft_inbound_events: network::RaftInboundEvents,

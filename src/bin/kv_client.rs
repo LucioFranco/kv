@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use structopt::StructOpt;
 use tokio::net::signal;
 use tonic::Request;
-use tracing::{error, debug};
+use tracing::{debug, error};
 
 #[derive(Clone, Debug, StructOpt)]
 #[structopt(name = "kv client", about = "A consitient kv store client")]
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Error> {
                 Ok(response) => {
                     debug!(message = "Put rpc completed.", ?response);
                     println!("Ok");
-                },
+                }
                 Err(error) => error!(message = "Put rpc failed.", %error),
             }
         }
@@ -93,7 +93,7 @@ async fn main() -> Result<(), Error> {
                     }
 
                     debug!(message = "Get rpc completed.", ?response);
-                },
+                }
                 Err(error) => error!(message = "Get rpc failed.", %error),
             }
         }

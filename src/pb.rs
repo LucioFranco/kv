@@ -2,6 +2,10 @@ use raft::eraftpb;
 
 tonic::include_proto!("kv");
 
+pub mod wal {
+    tonic::include_proto!("wal");
+}
+
 // Types suck
 
 impl From<eraftpb::Message> for Message {
