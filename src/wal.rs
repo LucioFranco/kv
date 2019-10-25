@@ -38,6 +38,10 @@ impl Log {
         })
     }
 
+    pub fn save_entry(&mut self, entry: pb::Entry) -> Result<(), crate::Error> {
+        
+    }
+
     pub fn save(&mut self, data: walpb::Record) -> Result<(), crate::Error> {
         if self.buf.remaining_mut() > data.encoded_len() {
             self.buf.clear();
