@@ -21,7 +21,7 @@ harness = false
 [dependencies]
 raft = { git = "https://github.com/pingcap/raft-rs", default-features = false, features = ["prost-codec"] }
 tonic = { git = "https://github.com/hyperium/tonic" }
-prost = "0.5"
+prost = "0.6"
 bytes = "0.4"
 tokio = { version = "0.2.0-alpha.6", features = ["signal"] }
 futures-util-preview = { version = "0.3.0-alpha.19" }
