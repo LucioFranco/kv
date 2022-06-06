@@ -23,7 +23,7 @@ raft = { git = "https://github.com/pingcap/raft-rs", default-features = false, f
 tonic = { git = "https://github.com/hyperium/tonic" }
 prost = "0.5"
 bytes = "0.4"
-tokio = { version = "0.2.0-alpha.6", features = ["signal"] }
+tokio = { version = "1.8.4", features = ["signal"] }
 futures-util-preview = { version = "0.3.0-alpha.19" }
 slog = "2.5"
 tracing = "0.1"
